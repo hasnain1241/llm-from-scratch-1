@@ -1,0 +1,6 @@
+torch
+numpy
+einops
+pytest
+regex
+tqdm
