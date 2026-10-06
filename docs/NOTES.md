@@ -11,6 +11,8 @@ One section per module: concept, math, tensor shapes, common bugs.
   for the sampling only, since it is an init helper and not a layer.
 - Linear forward uses `einops.einsum` with named dims so the contraction
   axis is explicit.
+- Embedding: truncated normal, std 1, cut at +-3. Lookup is plain indexing
+  (`weight[ids]`), not a one-hot matmul.
 
 ## Modules
 

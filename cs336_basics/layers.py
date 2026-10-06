@@ -47,3 +47,35 @@ class Linear(nn.Module):
     def forward(self, x):
         # "..." keeps any leading batch dims untouched.
         return einsum(x, self.weight, "... in_dim, out_dim in_dim -> ... out_dim")
+
+
+class Embedding(nn.Module):
+    """Lookup table that maps integer token ids to vectors.
+
+    Concept:
+        Each token id owns one learned row of the table. Looking up a row is
+        the same as multiplying a one-hot vector by the table, without
+        materializing the one-hot.
+
+    Shapes:
+        weight:    (vocab_size, d_model)
+        token_ids: (...,)  integer tensor, e.g. (batch, seq)
+        output:    (..., d_model)
+
+    Init:
+        Truncated normal, mean 0, std 1, cut at +-3.
+    """
+
+    def __init__(self, num_embeddings, embedding_dim, device=None, dtype=None):
+        super().__init__()
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+
+        self.weight = nn.Parameter(
+            torch.empty(num_embeddings, embedding_dim, device=device, dtype=dtype)
+        )
+        nn.init.trunc_normal_(self.weight, mean=0.0, std=1.0, a=-3.0, b=3.0)
+
+    def forward(self, token_ids):
+        # Advanced indexing: each id selects a row, giving (..., d_model).
+        return self.weight[token_ids]
