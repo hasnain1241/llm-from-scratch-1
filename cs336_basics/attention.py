@@ -42,7 +42,10 @@ def scaled_dot_product_attention(Q, K, V, mask=None):
         # Blocked positions get -inf, so softmax gives them weight exactly 0.
         scores = scores.masked_fill(~mask, float("-inf"))
 
-    weights = softmax(scores, dim=-1)  # each row sums to 1 over the keys
+    # Softmax in at least float32: under bf16/fp16 autocast, exp and the sum are
+    # too imprecise. Cast the weights back so the matmul with V stays low precision.
+    compute_dtype = torch.promote_types(scores.dtype, torch.float32)
+    weights = softmax(scores.to(compute_dtype), dim=-1).to(V.dtype)  # rows sum to 1
     return einsum(weights, V, "... q k, ... k d -> ... q d")
 
 
