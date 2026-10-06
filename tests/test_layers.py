@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from cs336_basics.layers import Embedding, Linear
+from cs336_basics.layers import Embedding, Linear, RMSNorm
 
 
 # ---------------------------------------------------------------- Linear
@@ -108,3 +108,74 @@ def test_embedding_gradient_only_touches_used_rows():
     assert grad[5].abs().sum() > 0
     unused = [i for i in range(10) if i not in (2, 5)]
     assert grad[unused].abs().sum() == 0
+
+
+# --------------------------------------------------------------- RMSNorm
+def reference_rms_norm(x, gain, eps):
+    """Plain float32 formula, used as the oracle."""
+    x32 = x.float()
+    rms = torch.sqrt(x32.pow(2).mean(-1, keepdim=True) + eps)
+    return (x32 / rms) * gain.float()
+
+
+def test_rmsnorm_shape_and_dtype():
+    norm = RMSNorm(16)
+    x = torch.randn(2, 5, 16)
+    y = norm(x)
+    assert y.shape == x.shape
+    assert y.dtype == torch.float32
+
+
+def test_rmsnorm_matches_reference():
+    norm = RMSNorm(32, eps=1e-5)
+    with torch.no_grad():
+        norm.weight.copy_(torch.randn(32))  # non-trivial gain
+    x = torch.randn(4, 7, 32) * 10
+    torch.testing.assert_close(norm(x), reference_rms_norm(x, norm.weight, 1e-5))
+
+
+def test_rmsnorm_matches_torch_rms_norm_if_available():
+    if not hasattr(F, "rms_norm"):
+        pytest.skip("F.rms_norm needs a newer torch")
+    norm = RMSNorm(32, eps=1e-5)
+    x = torch.randn(3, 32)
+    expected = F.rms_norm(x, (32,), weight=norm.weight, eps=1e-5)
+    torch.testing.assert_close(norm(x), expected)
+
+
+def test_rmsnorm_output_has_unit_rms_with_unit_gain():
+    norm = RMSNorm(64, eps=1e-8)
+    y = norm(torch.randn(10, 64) * 5)
+    rms = y.pow(2).mean(-1).sqrt()
+    torch.testing.assert_close(rms, torch.ones(10), atol=1e-4, rtol=1e-4)
+
+
+def test_rmsnorm_is_scale_invariant():
+    norm = RMSNorm(16, eps=1e-8)
+    x = torch.randn(3, 16)
+    torch.testing.assert_close(norm(x), norm(x * 100), atol=1e-4, rtol=1e-4)
+
+
+def test_rmsnorm_preserves_low_precision_dtype():
+    norm = RMSNorm(16)
+    x = torch.randn(2, 16).to(torch.bfloat16)
+    y = norm(x)
+    assert y.dtype == torch.bfloat16
+    expected = reference_rms_norm(x, norm.weight, 1e-5).to(torch.bfloat16)
+    torch.testing.assert_close(y, expected)
+
+
+def test_rmsnorm_fp16_large_values_do_not_overflow():
+    # 300^2 = 90000 > fp16 max (65504). Upcasting avoids inf.
+    norm = RMSNorm(8)
+    x = torch.full((1, 8), 300.0, dtype=torch.float16)
+    y = norm(x)
+    assert torch.isfinite(y).all()
+
+
+def test_rmsnorm_gain_is_learnable_and_initialized_to_one():
+    norm = RMSNorm(8)
+    assert norm.weight.shape == (8,)
+    assert torch.all(norm.weight == 1)
+    norm(torch.randn(2, 8)).sum().backward()
+    assert norm.weight.grad is not None

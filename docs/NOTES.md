@@ -13,6 +13,9 @@ One section per module: concept, math, tensor shapes, common bugs.
   axis is explicit.
 - Embedding: truncated normal, std 1, cut at +-3. Lookup is plain indexing
   (`weight[ids]`), not a one-hot matmul.
+- RMSNorm: input is upcast to float32 for the mean square, gain is applied in
+  float32, then the result is cast back to the input dtype. Gain is stored as
+  `weight`, initialized to ones. eps defaults to 1e-5.
 
 ## Modules
 

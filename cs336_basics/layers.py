@@ -79,3 +79,43 @@ class Embedding(nn.Module):
     def forward(self, token_ids):
         # Advanced indexing: each id selects a row, giving (..., d_model).
         return self.weight[token_ids]
+
+
+class RMSNorm(nn.Module):
+    """Root mean square layer normalization.
+
+    Concept:
+        Rescales each token's vector to unit root-mean-square, then applies a
+        learned per-feature gain. Unlike LayerNorm it does not subtract the mean
+        and has no bias, which makes it cheaper and works as well in practice.
+
+    Math:
+        RMS(x) = sqrt(mean(x_i^2) + eps)
+        y_i    = x_i / RMS(x) * g_i
+
+    Shapes:
+        x:    (..., d_model)
+        gain: (d_model,)
+        y:    (..., d_model), same dtype as x
+
+    The norm is computed in float32 and cast back, because squaring and
+    averaging in bf16 or fp16 loses precision (or overflows in fp16).
+    """
+
+    def __init__(self, d_model, eps=1e-5, device=None, dtype=None):
+        super().__init__()
+        self.d_model = d_model
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(d_model, device=device, dtype=dtype))
+
+    def forward(self, x):
+        in_dtype = x.dtype
+        x = x.to(torch.float32)
+
+        # Mean over the feature dim only; keepdim so it broadcasts back.
+        mean_square = x.pow(2).mean(dim=-1, keepdim=True)
+        x_normed = x * torch.rsqrt(mean_square + self.eps)
+
+        # Apply the gain in float32 too, then cast back to the input dtype.
+        out = x_normed * self.weight.to(torch.float32)
+        return out.to(in_dtype)
