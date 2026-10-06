@@ -28,6 +28,10 @@ One section per module: concept, math, tensor shapes, common bugs.
   buffers of shape (max_seq_len, d_k/2). token_positions must broadcast against
   x.shape[:-1]; in multi-head attention pass a (seq,) tensor so it broadcasts
   over batch and heads.
+- Attention mask convention: boolean, True = may attend (same as
+  F.scaled_dot_product_attention). Blocked scores are filled with -inf before
+  softmax. A fully masked row yields NaN, so callers must keep at least one True
+  per query row.
 
 ## Modules
 
