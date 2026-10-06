@@ -6,7 +6,16 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from cs336_basics.layers import Embedding, Linear, RMSNorm, SwiGLU, default_d_ff, silu, softmax
+from cs336_basics.layers import (
+    Embedding,
+    Linear,
+    RMSNorm,
+    RotaryPositionalEmbedding,
+    SwiGLU,
+    default_d_ff,
+    silu,
+    softmax,
+)
 
 
 # ---------------------------------------------------------------- Linear
@@ -290,3 +299,95 @@ def test_swiglu_gradients_reach_all_three_matrices():
     ffn(torch.randn(2, 16)).sum().backward()
     for name in ("w1", "w2", "w3"):
         assert getattr(ffn, name).weight.grad is not None
+
+
+# ------------------------------------------------------------------ RoPE
+def complex_rope_reference(x, positions, theta):
+    """Oracle: treat each feature pair as a complex number and multiply by e^{i a}."""
+    d_k = x.shape[-1]
+    inv_freq = theta ** (-torch.arange(0, d_k, 2).float() / d_k)  # (d_k/2,)
+    angles = positions.float()[..., None] * inv_freq  # (..., seq, d_k/2)
+    rotation = torch.polar(torch.ones_like(angles), angles)
+    pairs = torch.view_as_complex(x.float().reshape(*x.shape[:-1], d_k // 2, 2))
+    rotated = torch.view_as_real(pairs * rotation)
+    return rotated.reshape(x.shape)
+
+
+def test_rope_shape_and_dtype():
+    rope = RotaryPositionalEmbedding(10000.0, 16, 32)
+    x = torch.randn(2, 8, 16)
+    pos = torch.arange(8)
+    y = rope(x, pos)
+    assert y.shape == x.shape
+    assert y.dtype == x.dtype
+
+
+def test_rope_matches_complex_reference():
+    rope = RotaryPositionalEmbedding(10000.0, 16, 64)
+    x = torch.randn(3, 10, 16)
+    pos = torch.arange(10)
+    expected = complex_rope_reference(x, pos, 10000.0)
+    torch.testing.assert_close(rope(x, pos), expected, atol=1e-5, rtol=1e-5)
+
+
+def test_rope_with_batched_positions():
+    rope = RotaryPositionalEmbedding(10000.0, 8, 64)
+    x = torch.randn(2, 5, 8)
+    pos = torch.randint(0, 64, (2, 5))
+    expected = complex_rope_reference(x, pos, 10000.0)
+    torch.testing.assert_close(rope(x, pos), expected, atol=1e-5, rtol=1e-5)
+
+
+def test_rope_with_head_dim_and_shared_positions():
+    rope = RotaryPositionalEmbedding(10000.0, 8, 64)
+    x = torch.randn(2, 4, 6, 8)  # (batch, heads, seq, d_k)
+    pos = torch.arange(6)
+    y = rope(x, pos)
+    assert y.shape == x.shape
+    # Every (batch, head) slice is rotated the same way.
+    torch.testing.assert_close(y[1, 3], rope(x[1, 3], pos))
+
+
+def test_rope_position_zero_is_identity():
+    rope = RotaryPositionalEmbedding(10000.0, 16, 8)
+    x = torch.randn(4, 1, 16)
+    torch.testing.assert_close(rope(x, torch.zeros(1, dtype=torch.long)), x)
+
+
+def test_rope_preserves_vector_norm():
+    rope = RotaryPositionalEmbedding(10000.0, 16, 64)
+    x = torch.randn(3, 20, 16)
+    y = rope(x, torch.arange(20))
+    torch.testing.assert_close(y.norm(dim=-1), x.norm(dim=-1))
+
+
+def test_rope_dot_product_depends_only_on_relative_position():
+    d_k = 16
+    rope = RotaryPositionalEmbedding(10000.0, d_k, 128)
+    q = torch.randn(d_k)
+    k = torch.randn(d_k)
+
+    def score(m, n):
+        qm = rope(q[None, :], torch.tensor([m]))[0]
+        kn = rope(k[None, :], torch.tensor([n]))[0]
+        return torch.dot(qm, kn)
+
+    offset = 3  # m - n
+    base = score(offset, 0)
+    for shift in (1, 7, 25, 100):
+        torch.testing.assert_close(score(offset + shift, shift), base, atol=1e-4, rtol=1e-4)
+    # Sanity: a different offset gives a different score.
+    assert not torch.allclose(score(offset + 1, 0), base, atol=1e-4)
+
+
+def test_rope_buffers_are_not_in_state_dict():
+    rope = RotaryPositionalEmbedding(10000.0, 8, 16)
+    assert len(rope.state_dict()) == 0
+    assert len(list(rope.parameters())) == 0
+    assert rope.cos.shape == (16, 4)
+    assert rope.sin.shape == (16, 4)
+
+
+def test_rope_rejects_odd_d_k():
+    with pytest.raises(ValueError):
+        RotaryPositionalEmbedding(10000.0, 7, 16)

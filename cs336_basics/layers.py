@@ -7,7 +7,7 @@ nn.Embedding or nn.LayerNorm.
 import math
 
 import torch
-from einops import einsum
+from einops import einsum, rearrange
 from torch import nn
 
 
@@ -197,3 +197,70 @@ class SwiGLU(nn.Module):
         gate = silu(self.w1(x))  # (..., d_ff)
         value = self.w3(x)  # (..., d_ff)
         return self.w2(gate * value)  # (..., d_model)
+
+
+class RotaryPositionalEmbedding(nn.Module):
+    """Rotary positional embedding (RoPE).
+
+    Concept:
+        Instead of adding a position vector to the input, rotate the query and
+        key vectors by an angle that depends on the token position. The dot
+        product q_m . k_n then depends only on the offset m - n, so attention
+        sees relative positions. RoPE has no learned parameters.
+
+    Math:
+        Split the d_k features into d_k/2 pairs (x[2i], x[2i+1]). Pair i at
+        position m is rotated by angle  m * theta^(-2i / d_k):
+
+            [x'_2i  ]   [cos a  -sin a] [x_2i  ]
+            [x'_2i+1] = [sin a   cos a] [x_2i+1]      with a = m * theta^(-2i/d_k)
+
+        Low pairs rotate fast (local detail), high pairs rotate slowly (long range).
+
+    Shapes:
+        x:               (..., seq, d_k)    applied to q and k, never to v
+        token_positions: (..., seq)         integer positions, must broadcast
+                                            against x.shape[:-1]. With a head
+                                            dim in x, pass (seq,) so it
+                                            broadcasts across batch and heads.
+        output:          same shape as x
+
+    cos and sin tables of shape (max_seq_len, d_k/2) are precomputed once and
+    stored as non-persistent buffers (moved with .to(device), not saved in
+    checkpoints, since they can be recomputed).
+    """
+
+    def __init__(self, theta, d_k, max_seq_len, device=None):
+        super().__init__()
+        if d_k % 2 != 0:
+            raise ValueError(f"d_k must be even for RoPE, got {d_k}")
+        self.theta = theta
+        self.d_k = d_k
+        self.max_seq_len = max_seq_len
+
+        # inv_freq[i] = theta^(-2i / d_k), i = 0 .. d_k/2 - 1.   (d_k/2,)
+        pair_index = torch.arange(0, d_k, 2, device=device, dtype=torch.float32)
+        inv_freq = theta ** (-pair_index / d_k)
+
+        positions = torch.arange(max_seq_len, device=device, dtype=torch.float32)
+        # Outer product: angle[m, i] = m * inv_freq[i].     (max_seq_len, d_k/2)
+        angles = positions[:, None] * inv_freq[None, :]
+
+        self.register_buffer("cos", torch.cos(angles), persistent=False)
+        self.register_buffer("sin", torch.sin(angles), persistent=False)
+
+    def forward(self, x, token_positions):
+        # Look up the angles for each position: (..., seq, d_k/2).
+        cos = self.cos[token_positions].to(x.dtype)
+        sin = self.sin[token_positions].to(x.dtype)
+
+        # Even and odd features form the two coordinates of each 2D pair.
+        x_even = x[..., 0::2]  # (..., seq, d_k/2)
+        x_odd = x[..., 1::2]  # (..., seq, d_k/2)
+
+        rot_even = x_even * cos - x_odd * sin
+        rot_odd = x_even * sin + x_odd * cos
+
+        # Interleave back: (..., seq, d_k/2, 2) -> (..., seq, d_k).
+        out = torch.stack([rot_even, rot_odd], dim=-1)
+        return rearrange(out, "... pair two -> ... (pair two)")

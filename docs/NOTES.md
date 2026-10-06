@@ -23,6 +23,11 @@ One section per module: concept, math, tensor shapes, common bugs.
   64, minimum 64). Examples: 64 -> 192, 512 -> 1344, 768 -> 2048. SiLU is
   written by hand as x * sigmoid(x). Sub-layers are named w1 (gate), w2
   (output), w3 (value).
+- RoPE: features are paired as (0,1), (2,3), ... (interleaved layout, not the
+  half-split layout some libraries use). cos/sin tables are non-persistent
+  buffers of shape (max_seq_len, d_k/2). token_positions must broadcast against
+  x.shape[:-1]; in multi-head attention pass a (seq,) tensor so it broadcasts
+  over batch and heads.
 
 ## Modules
 
