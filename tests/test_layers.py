@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from cs336_basics.layers import Embedding, Linear, RMSNorm, softmax
+from cs336_basics.layers import Embedding, Linear, RMSNorm, SwiGLU, default_d_ff, silu, softmax
 
 
 # ---------------------------------------------------------------- Linear
@@ -224,3 +224,69 @@ def test_softmax_gradient_matches_torch():
     (softmax(x) * w).sum().backward()
     (torch.softmax(x2, dim=-1) * w).sum().backward()
     torch.testing.assert_close(x.grad, x2.grad)
+
+
+# ------------------------------------------------------------------ SiLU
+def test_silu_matches_torch():
+    x = torch.randn(5, 7) * 5
+    torch.testing.assert_close(silu(x), F.silu(x))
+
+
+def test_silu_known_values():
+    assert silu(torch.tensor(0.0)).item() == 0.0
+    # Large positive: close to identity. Large negative: close to 0.
+    assert silu(torch.tensor(20.0)).item() == pytest.approx(20.0, abs=1e-4)
+    assert abs(silu(torch.tensor(-20.0)).item()) < 1e-6
+
+
+# --------------------------------------------------------------- SwiGLU
+def test_default_d_ff_is_multiple_of_64_and_near_8_3():
+    for d_model in (64, 128, 256, 512, 768, 1024):
+        d_ff = default_d_ff(d_model)
+        assert d_ff % 64 == 0
+        assert abs(d_ff - 8 * d_model / 3) <= 32
+    assert default_d_ff(768) == 2048
+    assert default_d_ff(512) == 1344
+    assert default_d_ff(64) == 192
+
+
+def test_swiglu_shape_and_dtype():
+    ffn = SwiGLU(32, 96)
+    x = torch.randn(2, 5, 32)
+    y = ffn(x)
+    assert y.shape == (2, 5, 32)
+    assert y.dtype == torch.float32
+
+
+def test_swiglu_uses_default_d_ff_when_none():
+    ffn = SwiGLU(64)
+    assert ffn.d_ff == default_d_ff(64)
+
+
+def test_swiglu_weight_shapes():
+    ffn = SwiGLU(32, 96)
+    assert ffn.w1.weight.shape == (96, 32)
+    assert ffn.w3.weight.shape == (96, 32)
+    assert ffn.w2.weight.shape == (32, 96)
+
+
+def test_swiglu_matches_reference():
+    ffn = SwiGLU(32, 96)
+    x = torch.randn(3, 4, 32)
+    gate = F.silu(F.linear(x, ffn.w1.weight))
+    value = F.linear(x, ffn.w3.weight)
+    expected = F.linear(gate * value, ffn.w2.weight)
+    torch.testing.assert_close(ffn(x), expected)
+
+
+def test_swiglu_zero_input_gives_zero_output():
+    ffn = SwiGLU(16, 64)
+    y = ffn(torch.zeros(2, 16))
+    assert torch.all(y == 0)
+
+
+def test_swiglu_gradients_reach_all_three_matrices():
+    ffn = SwiGLU(16, 64)
+    ffn(torch.randn(2, 16)).sum().backward()
+    for name in ("w1", "w2", "w3"):
+        assert getattr(ffn, name).weight.grad is not None

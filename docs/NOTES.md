@@ -19,6 +19,10 @@ One section per module: concept, math, tensor shapes, common bugs.
 - softmax: subtract the per-row max before exp. A row that is entirely -inf
   would give NaN (inf - inf); the causal mask never produces such a row
   because each token can always attend to itself.
+- SwiGLU: d_ff defaults to round(8/3 * d_model / 64) * 64 (nearest multiple of
+  64, minimum 64). Examples: 64 -> 192, 512 -> 1344, 768 -> 2048. SiLU is
+  written by hand as x * sigmoid(x). Sub-layers are named w1 (gate), w2
+  (output), w3 (value).
 
 ## Modules
 

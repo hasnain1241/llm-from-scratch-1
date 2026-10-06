@@ -140,3 +140,60 @@ def softmax(x, dim=-1):
     x_max = x.max(dim=dim, keepdim=True).values
     exp_x = torch.exp(x - x_max)
     return exp_x / exp_x.sum(dim=dim, keepdim=True)
+
+
+def silu(x):
+    """SiLU (a.k.a. swish): x * sigmoid(x) = x / (1 + exp(-x)).
+
+    Smooth, non-monotonic cousin of ReLU. Shape is unchanged.
+    """
+    return x * torch.sigmoid(x)
+
+
+def default_d_ff(d_model, multiple_of=64):
+    """About 8/3 * d_model, rounded to the nearest multiple of `multiple_of`.
+
+    Why 8/3: a standard FFN has 2 matrices of size d_model x 4*d_model. SwiGLU
+    has 3 matrices, so using 8/3 * d_model keeps the parameter count about equal
+    (3 * 8/3 = 8 = 2 * 4). Multiples of 64 keep matmuls hardware friendly.
+    """
+    d_ff = int(round(8 * d_model / 3 / multiple_of)) * multiple_of
+    return max(d_ff, multiple_of)
+
+
+class SwiGLU(nn.Module):
+    """Position-wise feed-forward network with a gated SiLU (SwiGLU).
+
+    Concept:
+        One linear branch is passed through SiLU and used as a gate that
+        multiplies a second linear branch, element by element. A third matrix
+        projects back to d_model.
+
+    Math:
+        FFN(x) = W2 ( SiLU(W1 x) * (W3 x) )
+
+    Shapes:
+        x:  (..., d_model)
+        W1: (d_ff, d_model)   gate branch
+        W3: (d_ff, d_model)   value branch
+        W2: (d_model, d_ff)   output projection
+        y:  (..., d_model)
+
+    If d_ff is None it defaults to default_d_ff(d_model).
+    """
+
+    def __init__(self, d_model, d_ff=None, device=None, dtype=None):
+        super().__init__()
+        if d_ff is None:
+            d_ff = default_d_ff(d_model)
+        self.d_model = d_model
+        self.d_ff = d_ff
+
+        self.w1 = Linear(d_model, d_ff, device=device, dtype=dtype)
+        self.w2 = Linear(d_ff, d_model, device=device, dtype=dtype)
+        self.w3 = Linear(d_model, d_ff, device=device, dtype=dtype)
+
+    def forward(self, x):
+        gate = silu(self.w1(x))  # (..., d_ff)
+        value = self.w3(x)  # (..., d_ff)
+        return self.w2(gate * value)  # (..., d_model)
