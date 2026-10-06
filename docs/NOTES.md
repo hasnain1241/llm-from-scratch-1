@@ -32,6 +32,11 @@ One section per module: concept, math, tensor shapes, common bugs.
   F.scaled_dot_product_attention). Blocked scores are filled with -inf before
   softmax. A fully masked row yields NaN, so callers must keep at least one True
   per query row.
+- Multi-head attention: separate q/k/v/output Linear layers (not fused) for
+  clarity. Fused is slightly faster on GPU, same math. RoPE is applied to q and
+  k only. Default positions are arange(seq); a (batch, seq) positions tensor is
+  unsqueezed to broadcast over heads. RoPE is passed in as a module, so
+  rope=None gives NoPE (used by the ablation switch later).
 
 ## Modules
 
