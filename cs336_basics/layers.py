@@ -119,3 +119,24 @@ class RMSNorm(nn.Module):
         # Apply the gain in float32 too, then cast back to the input dtype.
         out = x_normed * self.weight.to(torch.float32)
         return out.to(in_dtype)
+
+
+def softmax(x, dim=-1):
+    """Numerically stable softmax along one dimension.
+
+    Math:
+        softmax(x)_i = exp(x_i) / sum_j exp(x_j)
+
+    Stability:
+        exp overflows for large x (exp(1000) = inf). Softmax is unchanged if the
+        same constant is subtracted from every entry, so we subtract the max.
+        The largest exponent is then exp(0) = 1, and nothing overflows.
+
+    Shapes:
+        x:      (...) any shape
+        output: same shape as x, sums to 1 along `dim`
+    """
+    # keepdim so the max broadcasts back against x.
+    x_max = x.max(dim=dim, keepdim=True).values
+    exp_x = torch.exp(x - x_max)
+    return exp_x / exp_x.sum(dim=dim, keepdim=True)

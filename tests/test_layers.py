@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from cs336_basics.layers import Embedding, Linear, RMSNorm
+from cs336_basics.layers import Embedding, Linear, RMSNorm, softmax
 
 
 # ---------------------------------------------------------------- Linear
@@ -179,3 +179,48 @@ def test_rmsnorm_gain_is_learnable_and_initialized_to_one():
     assert torch.all(norm.weight == 1)
     norm(torch.randn(2, 8)).sum().backward()
     assert norm.weight.grad is not None
+
+
+# --------------------------------------------------------------- softmax
+def test_softmax_matches_torch():
+    x = torch.randn(4, 5, 10)
+    for dim in (0, 1, 2, -1):
+        torch.testing.assert_close(softmax(x, dim=dim), torch.softmax(x, dim=dim))
+
+
+def test_softmax_shape_dtype_and_sums_to_one():
+    x = torch.randn(3, 8)
+    y = softmax(x, dim=-1)
+    assert y.shape == x.shape
+    assert y.dtype == x.dtype
+    torch.testing.assert_close(y.sum(-1), torch.ones(3))
+    assert (y >= 0).all()
+
+
+def test_softmax_large_values_are_stable():
+    x = torch.tensor([[1000.0, 1001.0, 1002.0], [-1000.0, -1001.0, -1002.0]])
+    y = softmax(x, dim=-1)
+    assert torch.isfinite(y).all()
+    torch.testing.assert_close(y, torch.softmax(x, dim=-1))
+
+
+def test_softmax_is_shift_invariant():
+    x = torch.randn(2, 6)
+    torch.testing.assert_close(softmax(x), softmax(x + 123.0))
+
+
+def test_softmax_handles_neg_inf_mask_entries():
+    # Masked attention scores use -inf. Those entries must get probability 0.
+    x = torch.tensor([[1.0, 2.0, float("-inf")]])
+    y = softmax(x, dim=-1)
+    assert y[0, 2] == 0
+    torch.testing.assert_close(y, torch.softmax(x, dim=-1))
+
+
+def test_softmax_gradient_matches_torch():
+    x = torch.randn(3, 5, dtype=torch.float64, requires_grad=True)
+    x2 = x.detach().clone().requires_grad_(True)
+    w = torch.randn(3, 5, dtype=torch.float64)
+    (softmax(x) * w).sum().backward()
+    (torch.softmax(x2, dim=-1) * w).sum().backward()
+    torch.testing.assert_close(x.grad, x2.grad)

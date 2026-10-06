@@ -16,6 +16,9 @@ One section per module: concept, math, tensor shapes, common bugs.
 - RMSNorm: input is upcast to float32 for the mean square, gain is applied in
   float32, then the result is cast back to the input dtype. Gain is stored as
   `weight`, initialized to ones. eps defaults to 1e-5.
+- softmax: subtract the per-row max before exp. A row that is entirely -inf
+  would give NaN (inf - inf); the causal mask never produces such a row
+  because each token can always attend to itself.
 
 ## Modules
 
